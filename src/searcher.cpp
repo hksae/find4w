@@ -7,7 +7,7 @@
 #include "find4w/filter.hpp"
 #include "find4w/cli.hpp"
 #include <shlwapi.h>
-#include <mutex>
+#include <thread>
 
 namespace f4w {
 
@@ -128,7 +128,6 @@ void run_search(SearchConfig& config) {
 
     SearchStats stats;
     OutputWriter output(config);
-    std::mutex output_mutex;
 
     if (config.files_mode && config.use_mft) {
         wchar_t drive = config.search_path[0];
@@ -165,16 +164,36 @@ void run_search(SearchConfig& config) {
             }
         });
     } else {
+        ConcurrentQueue<FileResult> result_queue(8192);
+        std::atomic<bool> search_done{false};
+        std::atomic<int>  pending{0};
+
+        // Dedicated output thread — drains result_queue with no contention
+        std::thread output_thread([&]() {
+            for (;;) {
+                auto item = result_queue.try_pop();
+                if (!item) {
+                    if (search_done.load(std::memory_order_acquire) && result_queue.empty()) break;
+                    _mm_pause();
+                    continue;
+                }
+                if (!config.quiet) {
+                    if (config.count_only)
+                        output.write_count(item->file_path, item->match_count);
+                    else
+                        output.write_result(*item);
+                }
+            }
+        });
+
         ThreadPool pool(config.thread_count);
-        std::atomic<bool> done{false};
-        std::atomic<int> pending{0};
 
         enumerate_files(config, [&](FileEntry&& fe) {
             pending++;
             auto path = fe.path;
             auto size = fe.size;
 
-            pool.submit([path, size, &config, &stats, &output, &output_mutex, &pending]() {
+            pool.submit([path, size, &config, &stats, &result_queue, &pending]() {
                 stats.files_searched++;
 
                 auto result = search_file_content(path, size, config);
@@ -183,24 +202,20 @@ void run_search(SearchConfig& config) {
                 if (!result.matches.empty()) {
                     stats.files_matched++;
                     stats.total_matches += result.match_count;
-
-                    if (!config.quiet) {
-                        std::lock_guard<std::mutex> lock(output_mutex);
-                        if (config.count_only)
-                            output.write_count(result.file_path, result.match_count);
-                        else
-                            output.write_result(result);
-                    }
+                    while (!result_queue.try_push(std::move(result)))
+                        _mm_pause();
                 }
 
                 pending--;
             });
         });
 
-        while (pending.load() > 0)
-            Sleep(1);
+        while (pending.load(std::memory_order_acquire) > 0)
+            _mm_pause();
 
+        search_done.store(true, std::memory_order_release);
         pool.shutdown();
+        output_thread.join();
     }
 
     output.flush();
