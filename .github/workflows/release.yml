@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        run: cmake -B build -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Create release archive
+        run: Compress-Archive -Path build\find4w.exe -DestinationPath find4w-${{ github.ref_name }}-x64-windows.zip
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: find4w ${{ github.ref_name }}
+          body: |
+            ## find4w ${{ github.ref_name }}
+
+            Windows-native file search binary (x64, MSVC Release build).
+
+            ### Install
+            Download `find4w-${{ github.ref_name }}-x64-windows.zip`, extract and add to PATH.
+
+            ### Usage
+            ```
+            find4w <PATTERN> [PATH]
+            find4w -i "error" C:\logs
+            find4w -f "*.log" C:\
+            ```
+          files: find4w-${{ github.ref_name }}-x64-windows.zip
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
