@@ -2,17 +2,6 @@
 
 Ultra-fast Windows-native file search.
 
-## Benchmarks
-
-Tested on warm OS page cache vs ripgrep 15.2.0 (MSVC build):
-
-| Tool | avg | best |
-|------|-----|------|
-| **find4w** | 239 ms | 186 ms |
-| ripgrep | 692 ms | 502 ms |
-
-**find4w is ~2.9x faster** on warm cache (C source tree, pattern `return`).
-
 ## Key optimizations
 
 - **NtQueryDirectoryFile** — NT native API for directory traversal (~30-40% faster than FindFirstFile)
