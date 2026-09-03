@@ -32,6 +32,7 @@ struct SearchConfig {
     bool files_mode        = false;
     bool show_line_numbers = true;
     bool no_gitignore      = false;
+    bool multiline         = false;
 
     int context_before = 0;
     int context_after  = 0;

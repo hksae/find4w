@@ -81,6 +81,46 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
         }
         uint32_t nl_count = (uint32_t)(lt.size() - 1);
 
+        // Multiline path: search across line boundaries
+        if (config.multiline) {
+            const char* p = data;
+            size_t rem = data_size;
+            while (rem >= needle_len) {
+                const char* found = simd_find(p, rem, needle, needle_len,
+                                              config.case_insensitive, config.has_avx2);
+                if (!found) break;
+
+                uint32_t mo = (uint32_t)(found - data);
+                // Line number of first matched line
+                auto it = std::upper_bound(lt.begin(), lt.end(), mo);
+                --it;
+                uint32_t ls = *it;
+                uint32_t line_num = base_line + (uint32_t)(it - lt.begin());
+
+                // Extend to end of last matched line (after pattern end)
+                const char* match_end = found + needle_len;
+                const char* le = match_end;
+                while (le < data + data_size && *le != '\n') ++le;
+
+                // Full content from line start to end of last matched line
+                size_t content_len = le - (data + ls);
+                if (content_len > 0 && *(le - 1) == '\r') --content_len;
+
+                MatchLine ml;
+                ml.line_number = line_num;
+                ml.line_content.assign(data + ls, content_len);
+                ml.col_start = mo - ls;
+                ml.col_end   = (uint32_t)(match_end - (data + ls));
+                result.matches.push_back(std::move(ml));
+                result.match_count++;
+                if (config.max_results > 0 && result.match_count >= (uint64_t)config.max_results) return nl_count;
+
+                p = (le < data + data_size) ? le + 1 : le;
+                rem = data_size - (p - data);
+            }
+            return nl_count;
+        }
+
         if (config.invert_match) {
             // invert match: scan line by line (rare path)
             for (size_t li = 0; li < lt.size(); ++li) {

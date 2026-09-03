@@ -52,6 +52,25 @@ void print_version() {
     WriteConsoleA(GetStdHandle(STD_OUTPUT_HANDLE), "find4w 1.0.0\n", 13, nullptr, nullptr);
 }
 
+static std::wstring process_escapes(const std::wstring& s) {
+    std::wstring r;
+    r.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == L'\\' && i + 1 < s.size()) {
+            switch (s[++i]) {
+                case L'n':  r += L'\n'; break;
+                case L't':  r += L'\t'; break;
+                case L'r':  r += L'\r'; break;
+                case L'\\': r += L'\\'; break;
+                default:    r += L'\\'; r += s[i]; break;
+            }
+        } else {
+            r += s[i];
+        }
+    }
+    return r;
+}
+
 void print_help() {
     const char* text =
         "find4w 1.0.0 - Ultra-fast Windows-native file search\n"
@@ -77,6 +96,7 @@ void print_help() {
         "    -j <NUM>         Number of threads (default: auto)\n"
         "    --max-depth <N>  Max directory depth\n"
         "    --max-count <N>  Stop after N matches\n"
+        "    -M               Multiline search (\\n in pattern matches newline)\n"
         "    --no-color       Disable colored output\n"
         "    --no-ignore      Don't respect .gitignore\n"
         "    --version        Show version\n"
@@ -104,7 +124,9 @@ bool parse_args(int argc, wchar_t* argv[], SearchConfig& config) {
             print_version();
             return false;
         }
-        if (arg == L"-i") {
+        if (arg == L"-M" || arg == L"--multiline") {
+            config.multiline = true;
+        } else if (arg == L"-i") {
             config.case_insensitive = true;
         } else if (arg == L"-v") {
             config.invert_match = true;
@@ -165,6 +187,7 @@ bool parse_args(int argc, wchar_t* argv[], SearchConfig& config) {
 
     config.search_path = std::filesystem::absolute(config.search_path).wstring();
 
+    config.pattern = process_escapes(config.pattern);
     config.pattern_utf8 = to_utf8(config.pattern);
     config.pattern_lower_utf8 = to_lower_ascii(config.pattern_utf8);
 
