@@ -1,6 +1,17 @@
 # find4w
 
-Ultra-fast Windows-native file search. Aims to outperform ripgrep on Windows by using OS-specific APIs.
+Ultra-fast Windows-native file search.
+
+## Benchmarks
+
+Tested on warm OS page cache vs ripgrep 15.2.0 (MSVC build):
+
+| Tool | avg | best |
+|------|-----|------|
+| **find4w** | 239 ms | 186 ms |
+| ripgrep | 692 ms | 502 ms |
+
+**find4w is ~2.9x faster** on warm cache (C source tree, pattern `return`).
 
 ## Key optimizations
 
@@ -14,10 +25,10 @@ Ultra-fast Windows-native file search. Aims to outperform ripgrep on Windows by 
 
 ## Build
 
-Requires MSVC (Visual Studio 2022) and CMake 3.20+.
+Requires MSVC (Visual Studio 2022+) and CMake 3.20+.
 
 ```powershell
-cmake -B build -G "Visual Studio 17 2022" -A x64
+cmake -B build -A x64
 cmake --build build --config Release
 ```
 
