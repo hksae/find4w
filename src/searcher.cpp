@@ -11,6 +11,13 @@
 #include <regex>
 #include <inttypes.h>
 
+#if defined(_M_AMD64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#  include <immintrin.h>
+#  define F4W_HAS_X86_SIMD 1
+#else
+#  define F4W_HAS_X86_SIMD 0
+#endif
+
 static constexpr size_t TLS_BUF_INIT      = 256 * 1024;
 static constexpr size_t CHUNK_SIZE        = 2 * 1024 * 1024;
 static constexpr uint64_t LARGE_FILE_THR  = 100ULL * 1024 * 1024;
@@ -128,13 +135,14 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
             return (uint32_t)std::count(data, data + data_size, '\n');
         }
 
-        // Phase 1: SIMD newline scan → line start offset table
+        // Phase 1: newline scan → line start offset table
         thread_local std::vector<uint32_t> lt;
         lt.clear();
         lt.push_back(0);
         {
             size_t i = 0;
-#if defined(__AVX512F__) && defined(__AVX512BW__)
+#if F4W_HAS_X86_SIMD
+#  if defined(__AVX512F__) && defined(__AVX512BW__)
             if (config.has_avx512) {
                 __m512i nl512 = _mm512_set1_epi8('\n');
                 for (; i + 64 <= data_size; i += 64) {
@@ -147,7 +155,7 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
                     }
                 }
             } else
-#endif
+#  endif // AVX-512
             if (config.has_avx2) {
                 __m256i nl = _mm256_set1_epi8('\n');
                 for (; i + 32 <= data_size; i += 32) {
@@ -172,6 +180,8 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
                     }
                 }
             }
+#endif // F4W_HAS_X86_SIMD
+            // Scalar tail (or full scalar on ARM64)
             for (; i < data_size; ++i)
                 if (data[i] == '\n') lt.push_back((uint32_t)(i + 1));
         }
@@ -557,7 +567,7 @@ void run_search(SearchConfig& config) {
             });
         });
 
-        while (pending.load(std::memory_order_acquire) > 0) _mm_pause();
+        while (pending.load(std::memory_order_acquire) > 0) f4w_cpu_pause();
         pool.shutdown();
     } else {
         ConcurrentQueue<FileResult> result_queue(8192);
@@ -570,7 +580,7 @@ void run_search(SearchConfig& config) {
                 auto item = result_queue.try_pop();
                 if (!item) {
                     if (search_done.load(std::memory_order_acquire) && result_queue.empty()) break;
-                    _mm_pause();
+                    f4w_cpu_pause();
                     continue;
                 }
                 if (!config.quiet) {
@@ -599,7 +609,7 @@ void run_search(SearchConfig& config) {
                     stats.files_matched++;
                     stats.total_matches += result.match_count;
                     while (!result_queue.try_push(std::move(result)))
-                        _mm_pause();
+                        f4w_cpu_pause();
                 }
 
                 pending--;
@@ -607,7 +617,7 @@ void run_search(SearchConfig& config) {
         });
 
         while (pending.load(std::memory_order_acquire) > 0)
-            _mm_pause();
+            f4w_cpu_pause();
 
         search_done.store(true, std::memory_order_release);
         pool.shutdown();

@@ -12,13 +12,29 @@ jobs:
   build-and-release:
     runs-on: windows-latest
 
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            msvc_arch: x64
+            cmake_arch: x64
+            suffix: x64-windows
+          - arch: x86
+            msvc_arch: x86
+            cmake_arch: Win32
+            suffix: x86-windows
+          - arch: arm64
+            msvc_arch: amd64_arm64
+            cmake_arch: ARM64
+            suffix: arm64-windows
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Configure
         run: cmake -B build -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
@@ -27,7 +43,7 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Create release archive
-        run: Compress-Archive -Path build\find4w.exe -DestinationPath find4w-${{ github.ref_name }}-x64-windows.zip
+        run: Compress-Archive -Path build\find4w.exe -DestinationPath find4w-${{ github.ref_name }}-${{ matrix.suffix }}.zip
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -36,7 +52,7 @@ jobs:
           body: |
             ## find4w ${{ github.ref_name }}
 
-            Windows-native ultra-fast file search binary (x64, MSVC Release build).
+            Windows-native ultra-fast file search binary (x64, x86, ARM64 — MSVC Release).
 
             ### What's new in v0.2.0
             - 🔍 **Regex search** (`-E` / `--regex`) — ECMAScript regular expressions
@@ -45,21 +61,28 @@ jobs:
             - 📖 **Multiline search** (`-M`) — pattern spans line boundaries (`\n` in pattern)
             - ⚡ **Async overlapped I/O** — double-buffer pipeline for >100MB files
             - 🚀 **Direct I/O** (`--direct-io`) — bypass OS page cache
-            - 💻 **AVX-512** auto-detected newline scan (64-byte registers)
+            - 💻 **AVX-512 / AVX2 / SSE2** auto-detected; **ARM64** scalar fallback
+
+            ### Downloads
+            | File | Architecture |
+            |------|-------------|
+            | `find4w-*-x64-windows.zip` | 64-bit (most PCs) |
+            | `find4w-*-x86-windows.zip` | 32-bit |
+            | `find4w-*-arm64-windows.zip` | Windows on ARM |
 
             ### Install
-            Download `find4w-${{ github.ref_name }}-x64-windows.zip`, extract and add to PATH.
+            Download the appropriate zip, extract and add to PATH.
 
             ### Usage
             ```
             find4w <PATTERN> [PATH]           # literal search
             find4w -E "err(or|s)" C:\logs     # regex
             find4w "TODO*FIXME" src           # glob wildcard
-            find4w "new" -r "new" .           # in-place replace
+            find4w "old" -r "new" .           # in-place replace
             find4w -M "func.*{\nreturn" src   # multiline
             find4w -i "error" C:\logs         # case-insensitive
             find4w -f "*.log" C:\             # search file names (MFT)
             ```
-          files: find4w-${{ github.ref_name }}-x64-windows.zip
+          files: find4w-${{ github.ref_name }}-${{ matrix.suffix }}.zip
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

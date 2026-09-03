@@ -15,6 +15,16 @@
 #include <memory>
 #include <atomic>
 
+// Portable CPU pause (spin-wait hint)
+#if defined(_M_AMD64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#  include <immintrin.h>
+#  define f4w_cpu_pause() _mm_pause()
+#elif defined(_M_ARM64) || defined(__aarch64__)
+#  define f4w_cpu_pause() __yield()
+#else
+#  define f4w_cpu_pause() ((void)0)
+#endif
+
 namespace f4w {
 
 struct SearchConfig {

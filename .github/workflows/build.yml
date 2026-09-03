@@ -10,13 +10,26 @@ jobs:
   build:
     runs-on: windows-latest
 
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            msvc_arch: x64
+            suffix: x64
+          - arch: x86
+            msvc_arch: x86
+            suffix: x86
+          - arch: arm64
+            msvc_arch: amd64_arm64
+            suffix: arm64
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Configure
         run: cmake -B build -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
@@ -24,11 +37,12 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Test
+      - name: Test (x64 only — can't run ARM64 binary on x64 runner)
+        if: matrix.arch == 'x64'
         run: .\build\find4w.exe --help
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: find4w-x64
+          name: find4w-${{ matrix.suffix }}
           path: build/find4w.exe

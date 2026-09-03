@@ -95,7 +95,7 @@ static void process_directory(
                     if (is_dir) {
                         pending.fetch_add(1, std::memory_order_relaxed);
                         while (!dir_queue.try_push({std::move(full_path), task.depth + 1}))
-                            _mm_pause();
+                            f4w_cpu_pause();
                     } else {
                         FileEntry fe;
                         fe.path = std::move(full_path);
@@ -132,7 +132,7 @@ void enumerate_files(const SearchConfig& config, const FileCallback& callback) {
                 std::optional<DirTask> task;
                 while (!(task = dir_queue.try_pop())) {
                     if (pending.load(std::memory_order_acquire) == 0) return;
-                    _mm_pause();
+                    f4w_cpu_pause();
                 }
                 process_directory(*task, config, dir_queue, pending, callback);
             }

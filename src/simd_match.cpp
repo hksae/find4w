@@ -1,6 +1,13 @@
 #include "find4w/simd_match.hpp"
-#include <immintrin.h>
 #include <cstring>
+
+// x86 SIMD intrinsics are only available on x64/x86 targets
+#if defined(_M_AMD64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#  include <immintrin.h>
+#  define F4W_HAS_X86_SIMD 1
+#else
+#  define F4W_HAS_X86_SIMD 0
+#endif
 
 namespace f4w {
 
@@ -30,6 +37,8 @@ static const char* scalar_find(const char* h, size_t hlen, const char* n, size_t
 static inline char to_lower_c(char c) {
     return (c >= 'A' && c <= 'Z') ? c + 32 : c;
 }
+
+#if F4W_HAS_X86_SIMD
 
 // SSE2: compare first AND last char simultaneously (Horspool-style)
 static const char* sse2_find(const char* h, size_t hlen, const char* n, size_t nlen, bool ci) {
@@ -148,12 +157,20 @@ static const char* avx2_find(const char* h, size_t hlen, const char* n, size_t n
     return nullptr;
 }
 
+#endif // F4W_HAS_X86_SIMD
+
 const char* simd_find(const char* haystack, size_t haystack_len,
                       const char* needle, size_t needle_len,
                       bool case_insensitive, bool use_avx2) {
+#if F4W_HAS_X86_SIMD
     if (use_avx2)
         return avx2_find(haystack, haystack_len, needle, needle_len, case_insensitive);
     return sse2_find(haystack, haystack_len, needle, needle_len, case_insensitive);
+#else
+    // ARM64 / unknown arch: pure scalar fallback
+    (void)use_avx2;
+    return scalar_find(haystack, haystack_len, needle, needle_len, case_insensitive);
+#endif
 }
 
 size_t simd_count(const char* haystack, size_t haystack_len,
