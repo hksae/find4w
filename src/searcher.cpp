@@ -9,6 +9,8 @@
 #include <shlwapi.h>
 #include <thread>
 
+static constexpr size_t TLS_BUF_INIT = 256 * 1024;
+
 namespace f4w {
 
 static bool is_binary(const char* data, size_t len) {
@@ -30,7 +32,6 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
 
     const char* data = nullptr;
     HANDLE hMap = nullptr;
-    std::vector<char> read_buf;
     size_t data_size = 0;
 
     if (file_size > MMAP_THRESHOLD && file_size > 0) {
@@ -56,13 +57,14 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
             CloseHandle(hFile);
             return result;
         }
-        read_buf.resize(data_size);
+        thread_local std::vector<char> tls_buf(TLS_BUF_INIT);
+        if (tls_buf.size() < data_size) tls_buf.resize(data_size);
         DWORD read;
-        if (!ReadFile(hFile, read_buf.data(), (DWORD)data_size, &read, nullptr)) {
+        if (!ReadFile(hFile, tls_buf.data(), (DWORD)data_size, &read, nullptr)) {
             CloseHandle(hFile);
             return result;
         }
-        data = read_buf.data();
+        data = tls_buf.data();
         data_size = read;
     }
 
