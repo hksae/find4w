@@ -36,6 +36,8 @@ find4w -f "*.log" C:\            # search file names (MFT turbo mode)
 find4w -c "error" ./logs         # count matches
 find4w -M "func.*{\nreturn" .    # multiline: pattern spans lines
 find4w -E "err(or|s):\s" .       # ECMAScript regex
+find4w "TODO*FIXME" src          # glob wildcard (* and ? auto-detected)
+find4w "old_name" -r "new_name" . # in-place replace (atomic)
 find4w --direct-io "panic" .     # unbuffered direct I/O (bypass OS cache)
 ```
 
@@ -48,6 +50,8 @@ find4w --direct-io "panic" .     # unbuffered direct I/O (bypass OS cache)
 | `-c` | Count only |
 | `-M` | Multiline (`\n` in pattern matches newline) |
 | `-E, --regex` | ECMAScript regular expression |
+| `-r <STR>` | In-place replace matches with STR (atomic NTFS write) |
+| `*` / `?` in pattern | Auto glob mode (no flag needed) |
 | `--direct-io` | Unbuffered direct I/O (FILE_FLAG_NO_BUFFERING) |
 | `-q` | Quiet (exit code only) |
 | `-f <GLOB>` | Search file names |
