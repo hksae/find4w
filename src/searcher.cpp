@@ -36,62 +36,125 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
     const char* needle     = config.case_insensitive ? config.pattern_lower_utf8.c_str() : config.pattern_utf8.c_str();
     size_t      needle_len = config.pattern_utf8.size();
 
-    auto process_block = [&](const char* data, size_t data_size) {
-        if (is_binary(data, data_size)) { result.is_binary = true; return; }
+    char first_byte = config.case_insensitive
+        ? (char)tolower((unsigned char)needle[0]) : needle[0];
 
-        // Quick prefilter: if the first needle byte doesn't appear, skip the whole block
-        char first_byte = config.case_insensitive
-            ? (char)tolower((unsigned char)needle[0])
-            : needle[0];
-        if (!memchr(data, (unsigned char)first_byte, data_size)) return;
+    // search_block: two-pass. Returns number of '\n' in block (for line tracking across chunks).
+    auto search_block = [&](const char* data, size_t data_size, uint32_t base_line) -> uint32_t {
+        if (is_binary(data, data_size)) { result.is_binary = true; return 0; }
+        if (!memchr(data, (unsigned char)first_byte, data_size)) {
+            return (uint32_t)std::count(data, data + data_size, '\n');
+        }
 
-        uint32_t line_num = result.matches.empty() ? 1 : result.matches.back().line_number + 1;
-        const char* line_start = data;
-        const char* end = data + data_size;
-
-        while (line_start < end) {
-            const char* line_end = line_start;
-            while (line_end < end && *line_end != '\n') ++line_end;
-
-            size_t line_len = line_end - line_start;
-            if (line_len > 0 && *(line_end - 1) == '\r') --line_len;
-
-            if (line_len <= MAX_LINE_LENGTH) {
-                const char* found = simd_find(line_start, line_len, needle, needle_len,
-                                              config.case_insensitive, config.has_avx2);
-                bool has_match = (found != nullptr);
-                if (config.invert_match) has_match = !has_match;
-
-                if (has_match) {
-                    MatchLine ml;
-                    ml.line_number = line_num;
-                    ml.line_content = std::string(line_start, line_len);
-                    ml.col_start = (found && !config.invert_match) ? static_cast<uint32_t>(found - line_start) : 0;
-                    ml.col_end   = ml.col_start + (found && !config.invert_match ? static_cast<uint32_t>(needle_len) : 0);
-                    result.matches.push_back(std::move(ml));
-                    result.match_count++;
-                    if (config.max_results > 0 && result.match_count >= (uint64_t)config.max_results) return;
+        // Phase 1: SIMD newline scan → line start offset table
+        thread_local std::vector<uint32_t> lt;
+        lt.clear();
+        lt.push_back(0);
+        {
+            size_t i = 0;
+            if (config.has_avx2) {
+                __m256i nl = _mm256_set1_epi8('\n');
+                for (; i + 32 <= data_size; i += 32) {
+                    int mask = _mm256_movemask_epi8(
+                        _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)(data + i)), nl));
+                    while (mask) {
+                        uint32_t b = _tzcnt_u32((uint32_t)mask);
+                        lt.push_back((uint32_t)(i + b + 1));
+                        mask &= mask - 1;
+                    }
+                }
+                _mm256_zeroupper();
+            } else {
+                __m128i nl = _mm_set1_epi8('\n');
+                for (; i + 16 <= data_size; i += 16) {
+                    int mask = _mm_movemask_epi8(
+                        _mm_cmpeq_epi8(_mm_loadu_si128((const __m128i*)(data + i)), nl));
+                    while (mask) {
+                        uint32_t b = _tzcnt_u32((uint32_t)mask);
+                        lt.push_back((uint32_t)(i + b + 1));
+                        mask &= mask - 1;
+                    }
                 }
             }
-            line_start = line_end + 1;
-            line_num++;
+            for (; i < data_size; ++i)
+                if (data[i] == '\n') lt.push_back((uint32_t)(i + 1));
         }
+        uint32_t nl_count = (uint32_t)(lt.size() - 1);
+
+        if (config.invert_match) {
+            // invert match: scan line by line (rare path)
+            for (size_t li = 0; li < lt.size(); ++li) {
+                uint32_t ls = lt[li];
+                uint32_t le = (li + 1 < lt.size()) ? lt[li + 1] - 1 : (uint32_t)data_size;
+                size_t ll = le - ls;
+                if (ll > 0 && data[ls + ll - 1] == '\r') --ll;
+                if (ll > MAX_LINE_LENGTH) continue;
+                const char* found = simd_find(data + ls, ll, needle, needle_len,
+                                              config.case_insensitive, config.has_avx2);
+                if (!found) {
+                    MatchLine ml;
+                    ml.line_number = base_line + (uint32_t)li;
+                    ml.line_content.assign(data + ls, ll);
+                    ml.col_start = ml.col_end = 0;
+                    result.matches.push_back(std::move(ml));
+                    result.match_count++;
+                    if (config.max_results > 0 && result.match_count >= (uint64_t)config.max_results) return nl_count;
+                }
+            }
+            return nl_count;
+        }
+
+        // Phase 2: SIMD pattern search, binary-search line table for line number
+        const char* p = data;
+        size_t rem = data_size;
+        while (rem >= needle_len) {
+            const char* found = simd_find(p, rem, needle, needle_len,
+                                          config.case_insensitive, config.has_avx2);
+            if (!found) break;
+
+            uint32_t mo = (uint32_t)(found - data);
+            auto it = std::upper_bound(lt.begin(), lt.end(), mo);
+            --it;
+            uint32_t ls = *it;
+            uint32_t line_num = base_line + (uint32_t)(it - lt.begin());
+
+            // Find line end (scalar — only for matching lines)
+            const char* le = found;
+            while (le < data + data_size && *le != '\n') ++le;
+            size_t ll = le - (data + ls);
+            if (ll > 0 && *(le - 1) == '\r') --ll;
+
+            if (ll <= MAX_LINE_LENGTH) {
+                MatchLine ml;
+                ml.line_number = line_num;
+                ml.line_content.assign(data + ls, ll);
+                ml.col_start = mo - ls;
+                ml.col_end   = ml.col_start + (uint32_t)needle_len;
+                result.matches.push_back(std::move(ml));
+                result.match_count++;
+                if (config.max_results > 0 && result.match_count >= (uint64_t)config.max_results) return nl_count;
+            }
+
+            p = (le < data + data_size) ? le + 1 : le;
+            rem = data_size - (p - data);
+        }
+        return nl_count;
     };
 
     if (file_size > LARGE_FILE_THR) {
-        // Chunked reading: 2MB chunks with needle_len-1 overlap to catch cross-boundary matches
         thread_local std::vector<char> chunk_buf(CHUNK_SIZE + 4096);
         size_t overlap = needle_len > 1 ? needle_len - 1 : 0;
         size_t offset = 0;
+        uint32_t cur_line = 1;
 
         while (offset < file_size && !result.is_binary) {
             size_t to_read = std::min(CHUNK_SIZE, (size_t)(file_size - offset));
             DWORD read = 0;
             if (!ReadFile(hFile, chunk_buf.data() + overlap, (DWORD)to_read, &read, nullptr) || read == 0) break;
             size_t block_size = overlap + read;
-            process_block(chunk_buf.data(), block_size);
+            search_block(chunk_buf.data(), block_size, cur_line);
             if (result.is_binary) break;
-            // Copy tail to front for overlap
+            cur_line += (uint32_t)std::count(chunk_buf.data() + overlap, chunk_buf.data() + block_size, '\n');
             if (read == to_read && overlap > 0)
                 memcpy(chunk_buf.data(), chunk_buf.data() + block_size - overlap, overlap);
             else
@@ -105,7 +168,7 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
             if (data) {
                 WIN32_MEMORY_RANGE_ENTRY range{(PVOID)data, (SIZE_T)file_size};
                 PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
-                process_block(data, static_cast<size_t>(file_size));
+                search_block(data, static_cast<size_t>(file_size), 1);
                 UnmapViewOfFile(data);
             }
             CloseHandle(hMap);
@@ -116,7 +179,7 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
         if (tls_buf.size() < sz) tls_buf.resize(sz);
         DWORD read = 0;
         if (ReadFile(hFile, tls_buf.data(), (DWORD)sz, &read, nullptr) && read > 0)
-            process_block(tls_buf.data(), read);
+            search_block(tls_buf.data(), read, 1);
     }
 
     CloseHandle(hFile);
