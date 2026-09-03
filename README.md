@@ -1,8 +1,11 @@
 # find4w
 
-Ultra-fast Windows-native file search.
+![find4w](assets/find4w_header.png)
+
+Fast Windows-native file search.
 
 ## Key optimizations
+
 
 - **NtQueryDirectoryFile** — NT native API for directory traversal (~30-40% faster than FindFirstFile)
 - **NTFS MFT direct read** — scans entire volume in seconds via `FSCTL_ENUM_USN_DATA`
