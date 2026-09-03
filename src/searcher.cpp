@@ -8,6 +8,7 @@
 #include "find4w/cli.hpp"
 #include <shlwapi.h>
 #include <thread>
+#include <regex>
 
 static constexpr size_t TLS_BUF_INIT      = 256 * 1024;
 static constexpr size_t CHUNK_SIZE        = 2 * 1024 * 1024;
@@ -29,6 +30,8 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
     result.file_path = path;
 
     DWORD flags = FILE_FLAG_SEQUENTIAL_SCAN;
+    if (config.direct_io)
+        flags |= FILE_FLAG_NO_BUFFERING;
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, flags, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return result;
@@ -52,6 +55,20 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
         lt.push_back(0);
         {
             size_t i = 0;
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+            if (config.has_avx512) {
+                __m512i nl512 = _mm512_set1_epi8('\n');
+                for (; i + 64 <= data_size; i += 64) {
+                    uint64_t mask = _mm512_cmpeq_epi8_mask(
+                        _mm512_loadu_si512((const __m512i*)(data + i)), nl512);
+                    while (mask) {
+                        uint32_t b = (uint32_t)_tzcnt_u64(mask);
+                        lt.push_back((uint32_t)(i + b + 1));
+                        mask &= mask - 1;
+                    }
+                }
+            } else
+#endif
             if (config.has_avx2) {
                 __m256i nl = _mm256_set1_epi8('\n');
                 for (; i + 32 <= data_size; i += 32) {
@@ -80,6 +97,53 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
                 if (data[i] == '\n') lt.push_back((uint32_t)(i + 1));
         }
         uint32_t nl_count = (uint32_t)(lt.size() - 1);
+
+        // Regex path (ECMAScript)
+        if (config.use_regex) {
+            using flag_t = std::regex_constants::syntax_option_type;
+            flag_t rf = std::regex_constants::ECMAScript | std::regex_constants::optimize;
+            if (config.case_insensitive) rf |= std::regex_constants::icase;
+            thread_local std::string  tl_pattern;
+            thread_local std::regex   tl_rx;
+            thread_local bool         tl_compiled = false;
+            if (!tl_compiled || tl_pattern != config.pattern_utf8) {
+                tl_pattern  = config.pattern_utf8;
+                tl_rx       = std::regex(tl_pattern, rf);
+                tl_compiled = true;
+            }
+            std::string view(data, data_size);
+            std::regex_constants::match_flag_type rx_flags = std::regex_constants::match_default;
+            if (config.multiline)
+                rx_flags = static_cast<std::regex_constants::match_flag_type>(
+                    rx_flags | std::regex_constants::multiline);
+            std::sregex_iterator it(view.begin(), view.end(), tl_rx, rx_flags);
+            std::sregex_iterator end;
+            for (; it != end; ++it) {
+                const auto& m = *it;
+                size_t mo = (size_t)m.position();
+                auto bit = std::upper_bound(lt.begin(), lt.end(), (uint32_t)mo);
+                --bit;
+                uint32_t ls       = *bit;
+                uint32_t line_num = base_line + (uint32_t)(bit - lt.begin());
+                // find line end
+                const char* le = data + mo + m.length();
+                while (le < data + data_size && *le != '\n') ++le;
+                size_t ll = le - (data + ls);
+                if (ll > 0 && *(le - 1) == '\r') --ll;
+                if (ll <= MAX_LINE_LENGTH) {
+                    MatchLine ml;
+                    ml.line_number = line_num;
+                    ml.line_content.assign(data + ls, ll);
+                    ml.col_start = (uint32_t)(mo - ls);
+                    ml.col_end   = ml.col_start + (uint32_t)m.length();
+                    result.matches.push_back(std::move(ml));
+                    result.match_count++;
+                    if (config.max_results > 0 && result.match_count >= (uint64_t)config.max_results)
+                        return nl_count;
+                }
+            }
+            return nl_count;
+        }
 
         // Multiline path: search across line boundaries
         if (config.multiline) {
@@ -182,24 +246,126 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
     };
 
     if (file_size > LARGE_FILE_THR) {
-        thread_local std::vector<char> chunk_buf(CHUNK_SIZE + 4096);
+        // Async double-buffer pipeline: read chunk N+1 while processing chunk N.
+        // Falls back to sync when direct_io is set (alignment constraints make
+        // overlapped + NO_BUFFERING complex; sync is still fast there).
+        static constexpr size_t ABUF_SIZE = CHUNK_SIZE;
         size_t overlap = needle_len > 1 ? needle_len - 1 : 0;
-        size_t offset = 0;
         uint32_t cur_line = 1;
 
-        while (offset < file_size && !result.is_binary) {
-            size_t to_read = std::min(CHUNK_SIZE, (size_t)(file_size - offset));
-            DWORD read = 0;
-            if (!ReadFile(hFile, chunk_buf.data() + overlap, (DWORD)to_read, &read, nullptr) || read == 0) break;
-            size_t block_size = overlap + read;
-            search_block(chunk_buf.data(), block_size, cur_line);
-            if (result.is_binary) break;
-            cur_line += (uint32_t)std::count(chunk_buf.data() + overlap, chunk_buf.data() + block_size, '\n');
-            if (read == to_read && overlap > 0)
-                memcpy(chunk_buf.data(), chunk_buf.data() + block_size - overlap, overlap);
-            else
-                overlap = 0;
-            offset += read;
+        if (!config.direct_io) {
+            // Two heap buffers; ping-pong between them
+            std::vector<char> buf0(ABUF_SIZE + 4096);
+            std::vector<char> buf1(ABUF_SIZE + 4096);
+
+            OVERLAPPED ov0{}, ov1{};
+            ov0.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+            ov1.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
+            OVERLAPPED* read_ov  = &ov0;  // currently issuing read
+            OVERLAPPED* proc_ov  = &ov1;  // previously issued (to wait+process)
+            std::vector<char>* read_buf = &buf0;
+            std::vector<char>* proc_buf = &buf1;
+
+            uint64_t offset     = 0;
+            size_t   proc_olap  = 0;
+            DWORD    proc_read  = 0;
+            bool     first      = true;
+            bool     read_pending = false;
+
+            auto issue_read = [&](std::vector<char>* buf, OVERLAPPED* ov, size_t olap) -> bool {
+                size_t remaining = file_size - offset;
+                if (remaining == 0) return false;
+                size_t to_read = std::min(ABUF_SIZE, remaining);
+                ZeroMemory(ov, sizeof(OVERLAPPED));
+                ResetEvent(ov->hEvent);
+                ov->Offset     = (DWORD)(offset & 0xFFFFFFFF);
+                ov->OffsetHigh = (DWORD)(offset >> 32);
+                // Copy overlap from previous buffer (caller already did this)
+                ReadFile(hFile, buf->data() + olap, (DWORD)to_read, nullptr, ov);
+                return true;
+            };
+
+            // Issue first read (offset=0, no overlap)
+            if (issue_read(read_buf, read_ov, 0)) {
+                read_pending = true;
+                offset += std::min(ABUF_SIZE, (size_t)file_size);
+            }
+
+            while (read_pending && !result.is_binary) {
+                // Wait for the read we just issued
+                WaitForSingleObject(read_ov->hEvent, INFINITE);
+                DWORD bytes_read = 0;
+                GetOverlappedResult(hFile, read_ov, &bytes_read, FALSE);
+
+                size_t cur_olap  = first ? 0 : proc_olap;
+                size_t block_size = cur_olap + bytes_read;
+                // (overlap bytes are already in the front of read_buf from last iteration)
+
+                // Issue next read into proc_buf while we will process read_buf
+                read_pending = false;
+                size_t next_olap = (bytes_read == ABUF_SIZE && overlap > 0) ? overlap : 0;
+                if (offset < file_size) {
+                    if (next_olap > 0)
+                        memcpy(proc_buf->data(), read_buf->data() + block_size - next_olap, next_olap);
+                    proc_ov->Offset     = (DWORD)(offset & 0xFFFFFFFF);
+                    proc_ov->OffsetHigh = (DWORD)(offset >> 32);
+                    ZeroMemory(proc_ov, sizeof(OVERLAPPED));
+                    ResetEvent(proc_ov->hEvent);
+                    proc_ov->Offset     = (DWORD)(offset & 0xFFFFFFFF);
+                    proc_ov->OffsetHigh = (DWORD)(offset >> 32);
+                    size_t to_read2 = std::min(ABUF_SIZE, (size_t)(file_size - offset));
+                    ReadFile(hFile, proc_buf->data() + next_olap, (DWORD)to_read2, nullptr, proc_ov);
+                    offset += to_read2;
+                    read_pending = true;
+                }
+
+                // Process current block (CPU work overlaps with next I/O)
+                uint32_t nls = search_block(read_buf->data(), block_size, cur_line);
+                cur_line += nls;
+                first = false;
+
+                // Swap buffers
+                std::swap(read_buf,  proc_buf);
+                std::swap(read_ov,   proc_ov);
+                proc_olap = next_olap;
+            }
+
+            CloseHandle(ov0.hEvent);
+            CloseHandle(ov1.hEvent);
+        } else {
+            // Sync path for direct_io (sector-aligned reads)
+            // Sector size alignment: buffers must be 4096-aligned
+            constexpr size_t ALIGN = 4096;
+            constexpr size_t ALIGNED_CHUNK = (ABUF_SIZE + ALIGN - 1) & ~(ALIGN - 1);
+            static thread_local std::vector<char> dbuf(ALIGNED_CHUNK + 4096 + ALIGN);
+
+            // Align pointer to sector boundary
+            char* raw = dbuf.data();
+            char* aligned = reinterpret_cast<char*>(
+                (reinterpret_cast<uintptr_t>(raw) + ALIGN - 1) & ~(uintptr_t)(ALIGN - 1));
+
+            size_t local_olap = 0;
+            size_t local_offset = 0;
+            while (local_offset < file_size && !result.is_binary) {
+                size_t remaining   = file_size - local_offset;
+                size_t to_read     = std::min(ALIGNED_CHUNK, remaining);
+                // Round up to sector for NO_BUFFERING
+                size_t aligned_read = (to_read + ALIGN - 1) & ~(ALIGN - 1);
+                DWORD read = 0;
+                if (!ReadFile(hFile, aligned + local_olap, (DWORD)aligned_read, &read, nullptr) || read == 0) break;
+                size_t actual = std::min((size_t)read, to_read);
+                size_t block_size = local_olap + actual;
+                search_block(aligned, block_size, cur_line);
+                if (result.is_binary) break;
+                cur_line += (uint32_t)std::count(aligned + local_olap, aligned + block_size, '\n');
+                if (actual == to_read && local_olap > 0)
+                    memcpy(aligned, aligned + block_size - local_olap, local_olap);
+                else
+                    local_olap = 0;
+                local_offset += actual;
+                if (actual == to_read && overlap > 0) local_olap = overlap;
+            }
         }
     } else if (file_size > MMAP_THRESHOLD) {
         HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);

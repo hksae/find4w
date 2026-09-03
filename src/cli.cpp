@@ -36,7 +36,9 @@ void detect_cpu_features(SearchConfig& config) {
     __cpuid(cpuinfo, 0);
     if (cpuinfo[0] >= 7) {
         __cpuidex(cpuinfo, 7, 0);
-        config.has_avx2 = (cpuinfo[1] & (1 << 5)) != 0;
+        config.has_avx2   = (cpuinfo[1] & (1 << 5)) != 0;
+        // AVX-512F: EBX bit 16
+        config.has_avx512 = (cpuinfo[1] & (1 << 16)) != 0;
     }
 }
 
@@ -97,6 +99,8 @@ void print_help() {
         "    --max-depth <N>  Max directory depth\n"
         "    --max-count <N>  Stop after N matches\n"
         "    -M               Multiline search (\\n in pattern matches newline)\n"
+        "    -E, --regex      Treat PATTERN as ECMAScript regular expression\n"
+        "    --direct-io      Use unbuffered direct I/O (FILE_FLAG_NO_BUFFERING)\n"
         "    --no-color       Disable colored output\n"
         "    --no-ignore      Don't respect .gitignore\n"
         "    --version        Show version\n"
@@ -126,6 +130,10 @@ bool parse_args(int argc, wchar_t* argv[], SearchConfig& config) {
         }
         if (arg == L"-M" || arg == L"--multiline") {
             config.multiline = true;
+        } else if (arg == L"-E" || arg == L"--regex") {
+            config.use_regex = true;
+        } else if (arg == L"--direct-io") {
+            config.direct_io = true;
         } else if (arg == L"-i") {
             config.case_insensitive = true;
         } else if (arg == L"-v") {

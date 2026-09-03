@@ -33,6 +33,8 @@ struct SearchConfig {
     bool show_line_numbers = true;
     bool no_gitignore      = false;
     bool multiline         = false;
+    bool use_regex         = false;
+    bool direct_io         = false;
 
     int context_before = 0;
     int context_after  = 0;
@@ -42,6 +44,7 @@ struct SearchConfig {
 
     bool use_mft       = false;
     bool has_avx2      = false;
+    bool has_avx512    = false;
     bool is_stdout_tty = true;
 };
 
