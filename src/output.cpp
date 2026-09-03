@@ -2,6 +2,7 @@
 #include "find4w/cli.hpp"
 #include <cstdio>
 #include <charconv>
+#include <inttypes.h>
 
 namespace f4w {
 
@@ -106,6 +107,15 @@ void OutputWriter::write_count(const std::wstring& path, uint64_t count) {
     auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), count);
     buf_append(std::string_view(num_buf, ptr - num_buf));
     buf_append("\n", 1);
+}
+
+void OutputWriter::write_replace_summary(const std::wstring& path, uint64_t count) {
+    auto path_u8 = to_utf8(path);
+    char cnt[32];
+    int clen = snprintf(cnt, sizeof(cnt), ": %" PRIu64 " replacement(s)\n", count);
+
+    write_colored(path_u8, COLOR_PATH);
+    buf_append(cnt, clen);
 }
 
 void OutputWriter::write_stats(const SearchStats& stats, double elapsed_ms) {

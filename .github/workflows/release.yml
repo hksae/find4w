@@ -36,16 +36,29 @@ jobs:
           body: |
             ## find4w ${{ github.ref_name }}
 
-            Windows-native file search binary (x64, MSVC Release build).
+            Windows-native ultra-fast file search binary (x64, MSVC Release build).
+
+            ### What's new in v0.2.0
+            - 🔍 **Regex search** (`-E` / `--regex`) — ECMAScript regular expressions
+            - 🌟 **Glob patterns** — `*` and `?` auto-detected in pattern, no flag needed
+            - ✏️ **In-place replace** (`-r "new"`) — atomic NTFS write via temp+rename
+            - 📖 **Multiline search** (`-M`) — pattern spans line boundaries (`\n` in pattern)
+            - ⚡ **Async overlapped I/O** — double-buffer pipeline for >100MB files
+            - 🚀 **Direct I/O** (`--direct-io`) — bypass OS page cache
+            - 💻 **AVX-512** auto-detected newline scan (64-byte registers)
 
             ### Install
             Download `find4w-${{ github.ref_name }}-x64-windows.zip`, extract and add to PATH.
 
             ### Usage
             ```
-            find4w <PATTERN> [PATH]
-            find4w -i "error" C:\logs
-            find4w -f "*.log" C:\
+            find4w <PATTERN> [PATH]           # literal search
+            find4w -E "err(or|s)" C:\logs     # regex
+            find4w "TODO*FIXME" src           # glob wildcard
+            find4w "new" -r "new" .           # in-place replace
+            find4w -M "func.*{\nreturn" src   # multiline
+            find4w -i "error" C:\logs         # case-insensitive
+            find4w -f "*.log" C:\             # search file names (MFT)
             ```
           files: find4w-${{ github.ref_name }}-x64-windows.zip
           draft: false

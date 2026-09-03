@@ -51,7 +51,7 @@ void detect_stdout_tty(SearchConfig& config) {
 }
 
 void print_version() {
-    WriteConsoleA(GetStdHandle(STD_OUTPUT_HANDLE), "find4w 1.0.0\n", 13, nullptr, nullptr);
+    WriteConsoleA(GetStdHandle(STD_OUTPUT_HANDLE), "find4w 0.2.0\n", 13, nullptr, nullptr);
 }
 
 static std::wstring process_escapes(const std::wstring& s) {
@@ -75,7 +75,7 @@ static std::wstring process_escapes(const std::wstring& s) {
 
 void print_help() {
     const char* text =
-        "find4w 1.0.0 - Ultra-fast Windows-native file search\n"
+        "find4w 0.2.0 - Ultra-fast Windows-native file search\n"
         "\n"
         "USAGE:\n"
         "    find4w [OPTIONS] <PATTERN> [PATH]\n"
@@ -100,11 +100,16 @@ void print_help() {
         "    --max-count <N>  Stop after N matches\n"
         "    -M               Multiline search (\\n in pattern matches newline)\n"
         "    -E, --regex      Treat PATTERN as ECMAScript regular expression\n"
+        "    -r, --replace    Replace matches with STRING (in-place atomic write)\n"
         "    --direct-io      Use unbuffered direct I/O (FILE_FLAG_NO_BUFFERING)\n"
         "    --no-color       Disable colored output\n"
         "    --no-ignore      Don't respect .gitignore\n"
         "    --version        Show version\n"
-        "    -h, --help       Show this help\n";
+        "    -h, --help       Show this help\n"
+        "\n"
+        "NOTES:\n"
+        "    Patterns with * or ? are automatically treated as glob wildcards.\n"
+        "    Use -E for full ECMAScript regex syntax.\n";
     DWORD written;
     WriteConsoleA(GetStdHandle(STD_OUTPUT_HANDLE), text, (DWORD)strlen(text), &written, nullptr);
 }
@@ -132,6 +137,9 @@ bool parse_args(int argc, wchar_t* argv[], SearchConfig& config) {
             config.multiline = true;
         } else if (arg == L"-E" || arg == L"--regex") {
             config.use_regex = true;
+        } else if ((arg == L"-r" || arg == L"--replace") && i + 1 < argc) {
+            config.do_replace = true;
+            config.replace_with = to_utf8(argv[++i]);
         } else if (arg == L"--direct-io") {
             config.direct_io = true;
         } else if (arg == L"-i") {
@@ -198,6 +206,15 @@ bool parse_args(int argc, wchar_t* argv[], SearchConfig& config) {
     config.pattern = process_escapes(config.pattern);
     config.pattern_utf8 = to_utf8(config.pattern);
     config.pattern_lower_utf8 = to_lower_ascii(config.pattern_utf8);
+
+    // Auto-detect glob: if pattern has * or ? and -E not set, convert to glob mode
+    if (!config.use_regex) {
+        const auto& p = config.pattern_utf8;
+        if (p.find('*') != std::string::npos || p.find('?') != std::string::npos) {
+            config.use_glob  = true;
+            config.use_regex = true; // glob is implemented via regex
+        }
+    }
 
     if (config.thread_count <= 0) {
         SYSTEM_INFO si;

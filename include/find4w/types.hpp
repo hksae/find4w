@@ -34,7 +34,10 @@ struct SearchConfig {
     bool no_gitignore      = false;
     bool multiline         = false;
     bool use_regex         = false;
+    bool use_glob          = false;   // auto-set when pattern has * or ?
     bool direct_io         = false;
+    bool do_replace        = false;   // -r mode: in-place replacement
+    std::string replace_with;         // replacement string (-r <str>)
 
     int context_before = 0;
     int context_after  = 0;

@@ -9,6 +9,7 @@
 #include <shlwapi.h>
 #include <thread>
 #include <regex>
+#include <inttypes.h>
 
 static constexpr size_t TLS_BUF_INIT      = 256 * 1024;
 static constexpr size_t CHUNK_SIZE        = 2 * 1024 * 1024;
@@ -22,6 +23,84 @@ static bool is_binary(const char* data, size_t len) {
         if (data[i] == '\0') return true;
     }
     return false;
+}
+
+// Convert glob pattern (*, ?) to ECMAScript regex string
+static std::string glob_to_regex(const std::string& pat) {
+    std::string r;
+    r.reserve(pat.size() * 2 + 4);
+    for (size_t i = 0; i < pat.size(); ++i) {
+        char c = pat[i];
+        switch (c) {
+            case '*':  r += ".*";   break;
+            case '?':  r += '.';    break;
+            case '.':  r += "\\.";  break;
+            case '^':  r += "\\^";  break;
+            case '$':  r += "\\$";  break;
+            case '(':  r += "\\(";  break;
+            case ')':  r += "\\)";  break;
+            case '[':  r += "\\[";  break;
+            case ']':  r += "\\]";  break;
+            case '{':  r += "\\{";  break;
+            case '}':  r += "\\}";  break;
+            case '+':  r += "\\+";  break;
+            case '|':  r += "\\|";  break;
+            case '\\': r += "\\\\"; break;
+            default:   r += c;      break;
+        }
+    }
+    return r;
+}
+
+// Atomic in-place replacement: write to tmpfile, then MoveFileExW (atomic on same volume)
+// Returns number of substitutions made, or -1 on I/O error.
+static int64_t replace_in_file(const std::wstring& path, const std::regex& rx,
+                               const std::string& replacement,
+                               std::regex_constants::match_flag_type rx_flags) {
+    // Read entire file
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return -1;
+    LARGE_INTEGER sz{};
+    GetFileSizeEx(hFile, &sz);
+    if (sz.QuadPart > 256LL * 1024 * 1024) { CloseHandle(hFile); return 0; } // skip >256MB
+
+    std::string content((size_t)sz.QuadPart, '\0');
+    DWORD read = 0;
+    if (!ReadFile(hFile, content.data(), (DWORD)sz.QuadPart, &read, nullptr)) {
+        CloseHandle(hFile); return -1;
+    }
+    CloseHandle(hFile);
+    content.resize(read);
+
+    // Count matches before replacement
+    auto match_begin = std::sregex_iterator(content.begin(), content.end(), rx, rx_flags);
+    int64_t n = (int64_t)std::distance(match_begin, std::sregex_iterator());
+    if (n == 0) return 0;
+
+    // Produce replaced content
+    std::string replaced = std::regex_replace(content, rx, replacement, rx_flags);
+
+    // Write to temp file adjacent to original
+    std::wstring tmp_path = path + L".f4w_tmp";
+    HANDLE hTmp = CreateFileW(tmp_path.c_str(), GENERIC_WRITE, 0,
+                              nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hTmp == INVALID_HANDLE_VALUE) return -1;
+    DWORD written = 0;
+    if (!WriteFile(hTmp, replaced.data(), (DWORD)replaced.size(), &written, nullptr) ||
+        written != (DWORD)replaced.size()) {
+        CloseHandle(hTmp);
+        DeleteFileW(tmp_path.c_str());
+        return -1;
+    }
+    CloseHandle(hTmp);
+
+    // Atomic rename (same volume = single metadata operation on NTFS)
+    if (!MoveFileExW(tmp_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp_path.c_str());
+        return -1;
+    }
+    return n;
 }
 
 static FileResult search_file_content(const std::wstring& path, uint64_t file_size,
@@ -98,7 +177,7 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
         }
         uint32_t nl_count = (uint32_t)(lt.size() - 1);
 
-        // Regex path (ECMAScript)
+        // Regex path (ECMAScript) — also used for glob patterns
         if (config.use_regex) {
             using flag_t = std::regex_constants::syntax_option_type;
             flag_t rf = std::regex_constants::ECMAScript | std::regex_constants::optimize;
@@ -106,8 +185,12 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
             thread_local std::string  tl_pattern;
             thread_local std::regex   tl_rx;
             thread_local bool         tl_compiled = false;
-            if (!tl_compiled || tl_pattern != config.pattern_utf8) {
-                tl_pattern  = config.pattern_utf8;
+            // For glob: convert * and ? to regex equivalents
+            std::string effective_pattern = config.use_glob
+                ? glob_to_regex(config.pattern_utf8)
+                : config.pattern_utf8;
+            if (!tl_compiled || tl_pattern != effective_pattern) {
+                tl_pattern  = effective_pattern;
                 tl_rx       = std::regex(tl_pattern, rf);
                 tl_compiled = true;
             }
@@ -434,6 +517,48 @@ void run_search(SearchConfig& config) {
                 stats.total_matches++;
             }
         });
+    } else if (config.do_replace) {
+        // Replace mode: find & replace in-place with atomic writes
+        using flag_t = std::regex_constants::syntax_option_type;
+        flag_t rf = std::regex_constants::ECMAScript | std::regex_constants::optimize;
+        if (config.case_insensitive) rf |= std::regex_constants::icase;
+
+        std::string effective_pattern = config.use_glob
+            ? glob_to_regex(config.pattern_utf8)
+            : config.pattern_utf8;
+        std::regex rx(effective_pattern, rf);
+
+        std::regex_constants::match_flag_type rx_flags = std::regex_constants::match_default;
+        if (config.multiline)
+            rx_flags = static_cast<std::regex_constants::match_flag_type>(
+                rx_flags | std::regex_constants::multiline);
+
+        std::atomic<int64_t> total_subs{0};
+        std::atomic<int64_t> files_changed{0};
+        std::atomic<int>     pending{0};
+        ThreadPool pool(config.thread_count);
+
+        enumerate_files(config, [&](FileEntry&& fe) {
+            pending++;
+            auto path = fe.path;
+            pool.submit([path, &rx, &rx_flags, &config, &output,
+                         &stats, &total_subs, &files_changed, &pending]() {
+                stats.files_searched++;
+                int64_t n = replace_in_file(path, rx, config.replace_with, rx_flags);
+                if (n > 0) {
+                    total_subs += n;
+                    files_changed++;
+                    stats.files_matched++;
+                    stats.total_matches += (uint64_t)n;
+                    if (!config.quiet)
+                        output.write_replace_summary(path, (uint64_t)n);
+                }
+                pending--;
+            });
+        });
+
+        while (pending.load(std::memory_order_acquire) > 0) _mm_pause();
+        pool.shutdown();
     } else {
         ConcurrentQueue<FileResult> result_queue(8192);
         std::atomic<bool> search_done{false};

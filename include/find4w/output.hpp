@@ -14,6 +14,7 @@ public:
     void write_result(const FileResult& result);
     void write_file_match(const std::wstring& path);
     void write_count(const std::wstring& path, uint64_t count);
+    void write_replace_summary(const std::wstring& path, uint64_t count);
     void write_stats(const SearchStats& stats, double elapsed_ms);
     void flush();
 
