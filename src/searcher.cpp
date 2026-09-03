@@ -37,7 +37,11 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
         hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
         if (hMap) {
             data = static_cast<const char*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0));
-            if (data) data_size = static_cast<size_t>(file_size);
+            if (data) {
+                data_size = static_cast<size_t>(file_size);
+                WIN32_MEMORY_RANGE_ENTRY range{(PVOID)data, data_size};
+                PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
+            }
         }
     }
 
