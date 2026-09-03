@@ -35,6 +35,8 @@ find4w -t cpp "TODO" .           # filter by extension
 find4w -f "*.log" C:\            # search file names (MFT turbo mode)
 find4w -c "error" ./logs         # count matches
 find4w -M "func.*{\nreturn" .    # multiline: pattern spans lines
+find4w -E "err(or|s):\s" .       # ECMAScript regex
+find4w --direct-io "panic" .     # unbuffered direct I/O (bypass OS cache)
 ```
 
 ## Options
@@ -45,6 +47,8 @@ find4w -M "func.*{\nreturn" .    # multiline: pattern spans lines
 | `-v` | Invert match |
 | `-c` | Count only |
 | `-M` | Multiline (`\n` in pattern matches newline) |
+| `-E, --regex` | ECMAScript regular expression |
+| `--direct-io` | Unbuffered direct I/O (FILE_FLAG_NO_BUFFERING) |
 | `-q` | Quiet (exit code only) |
 | `-f <GLOB>` | Search file names |
 | `-t <EXT>` | Filter by extension |
