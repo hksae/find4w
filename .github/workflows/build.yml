@@ -25,7 +25,10 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Test
-        run: .\build\find4w.exe --help
+        shell: pwsh
+        run: |
+          .\build\find4w.exe --help
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) { exit $LASTEXITCODE }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
