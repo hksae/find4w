@@ -39,6 +39,12 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
     auto process_block = [&](const char* data, size_t data_size) {
         if (is_binary(data, data_size)) { result.is_binary = true; return; }
 
+        // Quick prefilter: if the first needle byte doesn't appear, skip the whole block
+        char first_byte = config.case_insensitive
+            ? (char)tolower((unsigned char)needle[0])
+            : needle[0];
+        if (!memchr(data, (unsigned char)first_byte, data_size)) return;
+
         uint32_t line_num = result.matches.empty() ? 1 : result.matches.back().line_number + 1;
         const char* line_start = data;
         const char* end = data + data_size;
