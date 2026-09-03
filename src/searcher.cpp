@@ -9,7 +9,9 @@
 #include <shlwapi.h>
 #include <thread>
 
-static constexpr size_t TLS_BUF_INIT = 256 * 1024;
+static constexpr size_t TLS_BUF_INIT      = 256 * 1024;
+static constexpr size_t CHUNK_SIZE        = 2 * 1024 * 1024;
+static constexpr uint64_t LARGE_FILE_THR  = 100ULL * 1024 * 1024;
 
 namespace f4w {
 
@@ -26,58 +28,18 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
     FileResult result;
     result.file_path = path;
 
+    DWORD flags = FILE_FLAG_SEQUENTIAL_SCAN;
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        nullptr, OPEN_EXISTING, flags, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return result;
 
-    const char* data = nullptr;
-    HANDLE hMap = nullptr;
-    size_t data_size = 0;
+    const char* needle     = config.case_insensitive ? config.pattern_lower_utf8.c_str() : config.pattern_utf8.c_str();
+    size_t      needle_len = config.pattern_utf8.size();
 
-    if (file_size > MMAP_THRESHOLD && file_size > 0) {
-        hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
-        if (hMap) {
-            data = static_cast<const char*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0));
-            if (data) {
-                data_size = static_cast<size_t>(file_size);
-                WIN32_MEMORY_RANGE_ENTRY range{(PVOID)data, data_size};
-                PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
-            }
-        }
-    }
+    auto process_block = [&](const char* data, size_t data_size) {
+        if (is_binary(data, data_size)) { result.is_binary = true; return; }
 
-    if (!data) {
-        LARGE_INTEGER li;
-        if (!GetFileSizeEx(hFile, &li)) {
-            CloseHandle(hFile);
-            return result;
-        }
-        data_size = static_cast<size_t>(li.QuadPart);
-        if (data_size == 0) {
-            CloseHandle(hFile);
-            return result;
-        }
-        thread_local std::vector<char> tls_buf(TLS_BUF_INIT);
-        if (tls_buf.size() < data_size) tls_buf.resize(data_size);
-        DWORD read;
-        if (!ReadFile(hFile, tls_buf.data(), (DWORD)data_size, &read, nullptr)) {
-            CloseHandle(hFile);
-            return result;
-        }
-        data = tls_buf.data();
-        data_size = read;
-    }
-
-    if (is_binary(data, data_size)) {
-        result.is_binary = true;
-        goto cleanup;
-    }
-
-    {
-        const char* needle = config.case_insensitive ? config.pattern_lower_utf8.c_str() : config.pattern_utf8.c_str();
-        size_t needle_len = config.pattern_utf8.size();
-
-        uint32_t line_num = 1;
+        uint32_t line_num = result.matches.empty() ? 1 : result.matches.back().line_number + 1;
         const char* line_start = data;
         const char* end = data + data_size;
 
@@ -98,31 +60,59 @@ static FileResult search_file_content(const std::wstring& path, uint64_t file_si
                     MatchLine ml;
                     ml.line_number = line_num;
                     ml.line_content = std::string(line_start, line_len);
-
-                    if (found && !config.invert_match) {
-                        ml.col_start = static_cast<uint32_t>(found - line_start);
-                        ml.col_end = ml.col_start + static_cast<uint32_t>(needle_len);
-                    } else {
-                        ml.col_start = 0;
-                        ml.col_end = 0;
-                    }
-
+                    ml.col_start = (found && !config.invert_match) ? static_cast<uint32_t>(found - line_start) : 0;
+                    ml.col_end   = ml.col_start + (found && !config.invert_match ? static_cast<uint32_t>(needle_len) : 0);
                     result.matches.push_back(std::move(ml));
                     result.match_count++;
-
-                    if (config.max_results > 0 && result.match_count >= (uint64_t)config.max_results)
-                        break;
+                    if (config.max_results > 0 && result.match_count >= (uint64_t)config.max_results) return;
                 }
             }
-
             line_start = line_end + 1;
             line_num++;
         }
+    };
+
+    if (file_size > LARGE_FILE_THR) {
+        // Chunked reading: 2MB chunks with needle_len-1 overlap to catch cross-boundary matches
+        thread_local std::vector<char> chunk_buf(CHUNK_SIZE + 4096);
+        size_t overlap = needle_len > 1 ? needle_len - 1 : 0;
+        size_t offset = 0;
+
+        while (offset < file_size && !result.is_binary) {
+            size_t to_read = std::min(CHUNK_SIZE, (size_t)(file_size - offset));
+            DWORD read = 0;
+            if (!ReadFile(hFile, chunk_buf.data() + overlap, (DWORD)to_read, &read, nullptr) || read == 0) break;
+            size_t block_size = overlap + read;
+            process_block(chunk_buf.data(), block_size);
+            if (result.is_binary) break;
+            // Copy tail to front for overlap
+            if (read == to_read && overlap > 0)
+                memcpy(chunk_buf.data(), chunk_buf.data() + block_size - overlap, overlap);
+            else
+                overlap = 0;
+            offset += read;
+        }
+    } else if (file_size > MMAP_THRESHOLD) {
+        HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (hMap) {
+            auto data = static_cast<const char*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0));
+            if (data) {
+                WIN32_MEMORY_RANGE_ENTRY range{(PVOID)data, (SIZE_T)file_size};
+                PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
+                process_block(data, static_cast<size_t>(file_size));
+                UnmapViewOfFile(data);
+            }
+            CloseHandle(hMap);
+        }
+    } else if (file_size > 0) {
+        thread_local std::vector<char> tls_buf(TLS_BUF_INIT);
+        size_t sz = static_cast<size_t>(file_size);
+        if (tls_buf.size() < sz) tls_buf.resize(sz);
+        DWORD read = 0;
+        if (ReadFile(hFile, tls_buf.data(), (DWORD)sz, &read, nullptr) && read > 0)
+            process_block(tls_buf.data(), read);
     }
 
-cleanup:
-    if (data && hMap) UnmapViewOfFile(data);
-    if (hMap) CloseHandle(hMap);
     CloseHandle(hFile);
     return result;
 }
