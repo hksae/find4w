@@ -1,6 +1,5 @@
 # find4w
 
-![find4w](assets/find4w_header.png)
 
 Fast Windows-native file search.
 
